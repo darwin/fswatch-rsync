@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+
+# credits: this is a rewrite of https://github.com/vcraescu/fswatch-rsync/blob/master/sync.sh
+# which was likely a rewrite of https://github.com/aalto-ics-kepaco/fswatch-rsync/blob/master/fswatch-rsync.sh
+
+WSYNC_LATENCY=${WSYNC_LATENCY:-1}
+WSYNC_LAUNCH_PATH="$(pwd -P)"
+WSYNC_IGNORE_FILENAME=${WSYNC_IGNORE_FILENAME:-".wsignore"}
+WSYNC_RSYNC_OPTS=${WSYNC_RSYNC_OPTS}
+WSYNC_RSYNC_DEFAULT_OPTS=${WSYNC_RSYNC_DEFAULT_OPTS:-"--update --delete -amzrv --no-owner --no-group --force --exclude=.*"}
+
+echo ${WSYNC_RSYNC_DEFAULT_OPTS}
+
+# check color support
+colors=$(tput colors)
+if (($colors >= 8)); then
+  red='\033[0;31m'
+  green='\033[0;32m'
+  white='\033[0;37m'
+  nocolor='\033[00m'
+fi
+
+echo_err() {
+  printf "${red}%s${nocolor}\n" "$*" >&2;
+}
+
+show_usage() {
+  cat <<EOF
+usage: wsync <rsync-target-dir>
+       wsync <source-dir> <rsync-target-dir>
+
+examples:
+  wsync ~/my/project/dir user@host:/remote/path/to/project/dir
+EOF
+}
+
+WSYNC_SOURCE_DIR="$WSYNC_LAUNCH_PATH"
+WSYNC_RSYNC_TARGET_DIR=""
+
+case "$#" in
+  0) show_usage; exit 1 ;;
+  1) WSYNC_RSYNC_TARGET_DIR=$1 ;;
+  2) WSYNC_SOURCE_DIR=$1; WSYNC_RSYNC_TARGET_DIR=$2 ;;
+  *) show_usage; exit 1 ;;
+esac
+
+if [[ ! -d "$WSYNC_SOURCE_DIR" ]]; then
+  echo_err "source dir does not exist at '$WSYNC_SOURCE_DIR'"
+  exit 1
+fi
+
+WSYNC_IGNORE_PATH=${WSYNC_IGNORE_PATH:-"$WSYNC_SOURCE_DIR/$WSYNC_IGNORE_FILENAME"}
+
+build_fswatch_exclude_args() {
+  local exclude_file=$1
+  if [[ ! -e ${exclude_file} ]]; then
+    return
+  fi
+
+  local exclude_args=""
+  while read line; do
+    exclude_args="$exclude_args -e \"$line\" "
+  done < "$exclude_file"
+
+  echo "$exclude_args"
+}
+
+watch() {
+  local ignore_args=$(build_fswatch_exclude_args ${WSYNC_IGNORE_PATH})
+  fswatch -1 -r -l ${WSYNC_LATENCY} ${WSYNC_SOURCE_DIR} ${ignore_args} -e="^\\." -e "/\\."
+}
+
+sync() {
+  local exclude_from_arg="--exclude-from ${WSYNC_IGNORE_PATH}"
+  if [[ ! -e ${WSYNC_IGNORE_PATH} ]]; then
+    exclude_from_arg=""
+  fi
+
+  echo -e "${green}Synchronizing...${nocolor}"
+  rsync \
+   ${WSYNC_RSYNC_DEFAULT_OPTS} \
+   ${exclude_from_arg} \
+   ${WSYNC_RSYNC_OPTS} \
+   ${WSYNC_SOURCE_DIR}/ \
+   ${WSYNC_RSYNC_TARGET_DIR}
+  echo -e "${green}Done.${nocolor}"
+}
+
+echo -e "Local:  ${green}$WSYNC_SOURCE_DIR${nocolor}"
+echo -e "Remote: ${green}$WSYNC_RSYNC_TARGET_DIR${nocolor}"
+echo    ""
+echo    "Performing initial complete synchronization"
+echo -e "${red}Warning: Target directory will be overwritten with local version if differences occur.${nocolor}"
+
+# perform initial complete sync
+echo -e "${white}Press any key to continue (or abort with Ctrl-C)... ${nocolor}" && read -n1 -r key
+echo
+
+sync
+
+# watch for changes and sync (exclude hidden files)
+echo -e "${white}Watching for changes. Quit anytime with Ctrl-C.${nocolor}"
+
+trap exit SIGINT SIGTERM SIGHUP EXIT
+
+while watch; do
+  sync
+done
